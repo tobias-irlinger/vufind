@@ -1805,4 +1805,132 @@ class FolioTest extends \PHPUnit\Framework\TestCase
         $addresses = $this->driver->getPickupLocations($patron, $holdInfo);
         $this->assertEquals($expected, $addresses);
     }
+
+    /**
+     * Get driver configuration with online payment settings.
+     *
+     * @return array
+     */
+    protected function getOnlinePaymentDriverConfig(): array
+    {
+        $config = $this->defaultDriverConfig;
+        $config['OnlinePayment'] = [
+            'paymentMethod' => 'Online payment',
+            'servicePointId' => 'sp-1',
+            'nonPayableTypes' => ['Lost item fee'],
+        ];
+        return $config;
+    }
+
+    /**
+     * Test getMyFines, including the fields needed for online payment.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testGetMyFines(): void
+    {
+        $this->createConnector('get-my-fines', $this->getOnlinePaymentDriverConfig());
+        $expected = [
+            [
+                'id' => null,
+                'fineId' => 'fee-1',
+                'amount' => 350,
+                'balance' => 115,
+                'status' => 'Paid partially',
+                'fine' => 'Overdue fine',
+                'title' => 'Organic farming : everything you need to know',
+                'createdate' => '1 May 2024',
+                'payableOnline' => true,
+            ],
+            [
+                'id' => null,
+                'fineId' => 'fee-2',
+                'amount' => 2000,
+                'balance' => 2000,
+                'status' => 'Outstanding',
+                'fine' => 'Lost item fee',
+                'title' => null,
+                'createdate' => '2 May 2024',
+                'payableOnline' => false,
+            ],
+        ];
+        $this->assertEquals($expected, $this->driver->getMyFines(['id' => 'foo']));
+    }
+
+    /**
+     * Test getOnlinePaymentDetails (provided by OnlinePaymentTrait) with FOLIO fines.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testGetOnlinePaymentDetails(): void
+    {
+        $this->createConnector('get-my-fines', $this->getOnlinePaymentDriverConfig());
+        $patron = ['id' => 'foo'];
+        $fines = $this->driver->getMyFines($patron);
+        $details = $this->driver->getOnlinePaymentDetails($patron, $fines, null);
+        $this->assertTrue($details['payable']);
+        $this->assertEquals(115, $details['amount']);
+        $this->assertEquals(['fee-1'], array_column($details['fines'], 'fineId'));
+    }
+
+    /**
+     * Test a successful bulk payment registration.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testRegisterPayment(): void
+    {
+        $this->createConnector('register-payment', $this->getOnlinePaymentDriverConfig());
+        $result = $this->driver->registerPayment(['id' => 'foo'], 115, 'local-1', 'remote-1', 1);
+        $this->assertEquals(['success' => true], $result);
+    }
+
+    /**
+     * Test payment registration of selected fines that is rejected by FOLIO.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testRegisterPaymentFailure(): void
+    {
+        $this->createConnector('register-payment-failure', $this->getOnlinePaymentDriverConfig());
+        $result = $this->driver->registerPayment(['id' => 'foo'], 100, 'local-1', null, 1, ['fee-1']);
+        $this->assertEquals(
+            ['success' => false, 'reason' => 'Payment::error_payment_request_failed'],
+            $result
+        );
+    }
+
+    /**
+     * Test payment registration when the selected fines are not payable.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testRegisterPaymentWithNoPayableFines(): void
+    {
+        $this->createConnector('get-my-fines', $this->getOnlinePaymentDriverConfig());
+        $result = $this->driver->registerPayment(['id' => 'foo'], 2000, 'local-1', null, 1, ['fee-2']);
+        $this->assertEquals(
+            ['success' => false, 'reason' => 'Payment::error_fines_changed'],
+            $result
+        );
+    }
+
+    /**
+     * Test that payment registration requires the FOLIO-specific settings.
+     *
+     * @return void
+     */
+    #[\PHPUnit\Framework\Attributes\Depends('testTokens')]
+    public function testRegisterPaymentRequiresConfiguration(): void
+    {
+        $this->createConnector('empty');
+        $this->expectException(\VuFind\Exception\ILS::class);
+        $this->expectExceptionMessage('paymentMethod must be configured in [OnlinePayment]');
+        $this->driver->registerPayment(['id' => 'foo'], 100, 'local-1', null, 1);
+    }
 }

@@ -1,0 +1,46 @@
+[
+  {
+    "expectedPath": "/accounts",
+    "expectedParams": {
+      "query": "userId==foo and status.name==Open",
+      "offset": 0,
+      "limit": 1000
+    },
+    "status": 200,
+    "bodyType": "json",
+    "body": {
+      "accounts": [
+        {
+          "id": "fee-1",
+          "userId": "foo",
+          "amount": 3.5,
+          "remaining": 1.15,
+          "feeFineType": "Overdue fine",
+          "status": {
+            "name": "Open"
+          },
+          "paymentStatus": {
+            "name": "Paid partially"
+          },
+          "metadata": {
+            "createdDate": "2024-05-01T10:00:00.000+00:00"
+          }
+        }
+      ],
+      "totalRecords": 1
+    }
+  },
+  {
+    "expectedMethod": "POST",
+    "expectedPath": "/accounts-bulk/pay",
+    "expectedParams": "{\"accountIds\":[\"fee-1\"],\"amount\":\"1.00\",\"paymentMethod\":\"Online payment\",\"servicePointId\":\"sp-1\",\"userName\":\"config_username\",\"notifyPatron\":false,\"comments\":\"STAFF : Online payment local-1\",\"transactionInfo\":\"local-1\"}",
+    "comment": "FOLIO rejects the action (e.g. unknown payment method for the fee owner)",
+    "status": 422,
+    "bodyType": "json",
+    "body": {
+      "accountIds": ["fee-1"],
+      "amount": "1.00",
+      "errorMessage": "Payment method Online payment is not valid for fee/fine owner Main library"
+    }
+  }
+]

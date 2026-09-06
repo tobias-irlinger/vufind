@@ -38,6 +38,7 @@ use VuFind\Connection\Webhook;
 use VuFind\Exception\ILS as ILSException;
 use VuFind\I18n\Translator\TranslatorAwareInterface;
 use VuFind\ILS\Logic\AvailabilityStatus;
+use VuFind\ILS\Logic\OnlinePaymentTrait;
 use VuFindHttp\HttpServiceAwareInterface as HttpServiceAwareInterface;
 
 use function array_key_exists;
@@ -63,6 +64,7 @@ class Folio extends AbstractAPI implements
     HttpServiceAwareInterface,
     TranslatorAwareInterface
 {
+    use OnlinePaymentTrait;
     use SecretTrait;
     use \VuFindHttp\HttpServiceAwareTrait;
     use \VuFind\I18n\Translator\TranslatorAwareTrait;
@@ -3059,6 +3061,9 @@ class Folio extends AbstractAPI implements
     /**
      * This method queries the ILS for a patron's current fines.
      *
+     * Each fine includes the FOLIO account ID as fineId and a payableOnline flag
+     * (see OnlinePaymentTrait) so that the fines can be paid online.
+     *
      * @param array $patron The patron array from patronLogin
      *
      * @return array
@@ -3072,24 +3077,127 @@ class Folio extends AbstractAPI implements
                 'accounts',
                 '/accounts',
                 $query
-            ) as $fine
+            ) as $account
         ) {
-            $date = date_create($fine->metadata->createdDate);
-            $title = $fine->title ?? null;
-            $bibId = isset($fine->instanceId)
-                ? $this->getBibId($fine->instanceId)
+            $date = date_create($account->metadata->createdDate);
+            $title = $account->title ?? null;
+            $bibId = isset($account->instanceId)
+                ? $this->getBibId($account->instanceId)
                 : null;
-            $fines[] = [
+            $fine = [
                 'id' => $bibId,
-                'amount' => $fine->amount * 100,
-                'balance' => $fine->remaining * 100,
-                'status' => $fine->paymentStatus->name,
-                'fine' => $fine->feeFineType,
+                'fineId' => $account->id,
+                // Amounts are in cents; round to avoid floating point artifacts:
+                'amount' => (int)round($account->amount * 100),
+                'balance' => (int)round($account->remaining * 100),
+                'status' => $account->paymentStatus->name,
+                'fine' => $account->feeFineType,
                 'title' => $title,
                 'createdate' => date_format($date, 'j M Y'),
             ];
+            $fine['payableOnline'] = $this->fineIsPayable($fine);
+            $fines[] = $fine;
         }
         return $fines;
+    }
+
+    /**
+     * Register a payment.
+     *
+     * This is called after a successful online payment. The paid amount is
+     * registered in FOLIO with a single bulk pay action
+     * (POST /accounts-bulk/pay) covering all selected payable accounts; FOLIO
+     * distributes the amount across the accounts.
+     *
+     * @param array   $patron                  Patron
+     * @param int     $amount                  Amount to be registered as paid (in cents)
+     * @param string  $localPaymentIdentifier  Local payment identifier
+     * @param ?string $remotePaymentIdentifier Remote payment identifier
+     * @param int     $paymentId               Internal payment id
+     * @param ?array  $fineIds                 Fine IDs to mark paid or null for bulk payment
+     *
+     * @throws ILSException
+     * @return array Associative array with keys success (bool, always) and reason (string, on error)
+     *
+     * @SuppressWarnings(PHPMD.UnusedFormalParameter)
+     */
+    public function registerPayment(
+        array $patron,
+        int $amount,
+        string $localPaymentIdentifier,
+        ?string $remotePaymentIdentifier,
+        int $paymentId,
+        ?array $fineIds = null
+    ): array {
+        $paymentConfig = $this->config['OnlinePayment'] ?? [];
+        foreach (['paymentMethod', 'servicePointId'] as $setting) {
+            if (empty($paymentConfig[$setting])) {
+                throw new ILSException("Online payment: $setting must be configured in [OnlinePayment]");
+            }
+        }
+
+        ['ids' => $accountIds, 'amount' => $payable] = $this->getPayableAccounts($patron, $fineIds);
+        if (!$accountIds) {
+            $this->logError('Fine IDs do not match any of the payable fines');
+            return [
+                'success' => false,
+                'reason' => 'Payment::error_fines_changed',
+            ];
+        }
+
+        $comments = "Online payment $localPaymentIdentifier";
+        if ($remotePaymentIdentifier) {
+            $comments .= " ($remotePaymentIdentifier)";
+        }
+        $request = [
+            'accountIds' => $accountIds,
+            // FOLIO expects a decimal string; never register more than what is payable:
+            'amount' => number_format(min($amount, $payable) / 100, 2, '.', ''),
+            'paymentMethod' => $paymentConfig['paymentMethod'],
+            'servicePointId' => $paymentConfig['servicePointId'],
+            'userName' => $paymentConfig['userName'] ?? $this->config['API']['username'],
+            'notifyPatron' => (bool)($paymentConfig['notifyPatron'] ?? false),
+            'comments' => "STAFF : $comments",
+            'transactionInfo' => $remotePaymentIdentifier ?? $localPaymentIdentifier,
+        ];
+        $response = $this->makeRequest('POST', '/accounts-bulk/pay', json_encode($request), [], true);
+        if (!$response->isSuccess()) {
+            $this->logError(
+                "Failed to register payment $localPaymentIdentifier for patron {$patron['id']}: "
+                . $response->getStatusCode() . ': ' . $response->getBody()
+            );
+            return [
+                'success' => false,
+                'reason' => 'Payment::error_payment_request_failed',
+            ];
+        }
+        return [
+            'success' => true,
+        ];
+    }
+
+    /**
+     * Get the FOLIO accounts of a patron's fines that can be paid online.
+     *
+     * @param array  $patron  Patron
+     * @param ?array $fineIds Fine IDs to include or null for all payable fines
+     *
+     * @return array Associative array with keys ids (account IDs) and amount (payable total in cents)
+     */
+    protected function getPayableAccounts(array $patron, ?array $fineIds): array
+    {
+        $ids = [];
+        $amount = 0;
+        foreach ($this->getMyFines($patron) as $fine) {
+            if (
+                ($fine['payableOnline'] ?? false) && $fine['balance'] > 0
+                && (null === $fineIds || in_array($fine['fineId'], $fineIds))
+            ) {
+                $ids[] = $fine['fineId'];
+                $amount += $fine['balance'];
+            }
+        }
+        return compact('ids', 'amount');
     }
 
     /**

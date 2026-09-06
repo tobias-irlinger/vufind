@@ -1,0 +1,51 @@
+[
+  {
+    "expectedPath": "/accounts",
+    "expectedParams": {
+      "query": "userId==foo and status.name==Open",
+      "offset": 0,
+      "limit": 1000
+    },
+    "comment": "Two open fees: a partially paid overdue fine and a lost item fee (non-payable in the test configuration)",
+    "status": 200,
+    "bodyType": "json",
+    "body": {
+      "accounts": [
+        {
+          "id": "fee-1",
+          "userId": "foo",
+          "amount": 3.5,
+          "remaining": 1.15,
+          "feeFineType": "Overdue fine",
+          "title": "Organic farming : everything you need to know",
+          "status": {
+            "name": "Open"
+          },
+          "paymentStatus": {
+            "name": "Paid partially"
+          },
+          "metadata": {
+            "createdDate": "2024-05-01T10:00:00.000+00:00"
+          }
+        },
+        {
+          "id": "fee-2",
+          "userId": "foo",
+          "amount": 20,
+          "remaining": 20,
+          "feeFineType": "Lost item fee",
+          "status": {
+            "name": "Open"
+          },
+          "paymentStatus": {
+            "name": "Outstanding"
+          },
+          "metadata": {
+            "createdDate": "2024-05-02T10:00:00.000+00:00"
+          }
+        }
+      ],
+      "totalRecords": 2
+    }
+  }
+]
